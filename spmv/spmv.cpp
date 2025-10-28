@@ -127,6 +127,15 @@ class CSR {
         return num_nonzeros;
     }
 
+    // Get sum of all non-zero values
+    double GetSumOfValues() const {
+        double sum = 0.0;
+        for (const auto& val : values) {
+            sum += val;
+        }
+        return sum;
+    }
+
     // Print the CSR representation (for debugging)
     void Print() const {
         for (int i = 0; i < GetNumRows(); ++i) {
@@ -143,6 +152,7 @@ class CSR {
     std::vector<double> SpMV(const std::vector<double>& x) const {
         assert(x.size() == GetNumCols());
         std::vector<double> y(GetNumRows(), 0.0);
+        std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
             #pragma omp for nowait
@@ -153,12 +163,61 @@ class CSR {
                     y[i] += values[j] * x[col_ind[j]];
                 }
             }
-            std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
+            //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
         }
         return y;
     }
 
 };  // class CSR
+
+// Function to compare two double values with a tolerance rate
+// Returns true if they are equal within the tolerance, false otherwise
+// Tolerance is defined as tol_rate * expected_value
+bool ExpectEqual(double expected_value, double actual_value, double tol_rate = 1e-6) {
+    const double max_diff_allowed = expected_value * tol_rate;
+    if (std::abs(expected_value - actual_value) > max_diff_allowed) {
+        printf(
+            "tol_rate = %.8f, Expected %.8f but got %.8f\n",
+            tol_rate, actual_value, expected_value
+        );
+        return false;
+    }
+    return true;
+}
+
+// Benchmarking function for SpMV
+// Runs SpMV twice:
+// - iter 1 is a warm-up run performing A * x_1 where x_1 is a vector of all ones
+// - iter 2 is the actual benchmark performing A * x_5 where x_5 is a vector of all fives
+// Params:
+// - A: The CSR matrix
+// Returns:
+// - true if the benchmark passes validation, false otherwise
+bool BenchmarkSpMV(const CSR& A) {
+    const double A_element_wise_sum = A.GetSumOfValues();
+    std::vector<double> x1(A.GetNumCols(), 1.0); // Input vector of all ones
+    std::vector<double> x2(A.GetNumCols(), 5.0); // Input vector of all fives
+    const double y1_time_start = omp_get_wtime();
+    std::vector<double> y1 = A.SpMV(x1); // Warm-up run
+    const double y1_time_end = omp_get_wtime();
+    std::cout << "Warm-up SpMV time: " << (y1_time_end - y1_time_start) << " seconds.\n";
+    const double y2_time_start = omp_get_wtime();
+    std::vector<double> y2 = A.SpMV(x2); // Run twice for benchmarking
+    const double y2_time_end = omp_get_wtime();
+    std::cout << "Benchmark SpMV time: " << (y2_time_end - y2_time_start) << " seconds.\n";
+    // Validate results
+    double y1_element_wise_sum = 0.0;
+    for (const auto& val : y1) {
+        y1_element_wise_sum += val;
+    }
+    assert(ExpectEqual(A_element_wise_sum, y1_element_wise_sum));
+    double y2_element_wise_sum = 0.0;
+    for (const auto& val : y2) {
+        y2_element_wise_sum += val;
+    }
+    assert(ExpectEqual(A_element_wise_sum * 5.0, y2_element_wise_sum));
+    return true;
+}
 
 int main(int argc, char** argv) {
     std::cout << "Sparse Matrix-Vector Multiplication (SpMV) Benchmark\n";
@@ -171,13 +230,11 @@ int main(int argc, char** argv) {
     std::string matrix_file = argv[1];
     CSR csr_matrix = CSR::CreateFromMatrixMarketFile(matrix_file);
 
-    std::cout << "Num cols: " << csr_matrix.GetNumCols() << "\n";
-    std::vector<double> x(csr_matrix.GetNumCols(), 1.0); // Input vector of all ones
-    std::vector<double> y = csr_matrix.SpMV(x);
-
-    std::cout << "Result of SpMV:\n";
-    for (size_t i = 0; i < y.size(); ++i) {
-        std::cout << "y[" << i+1 << "] = " << y[i] << "\n";
+    if (!BenchmarkSpMV(csr_matrix)) {
+        std::cerr << "SpMV benchmark failed validation.\n";
+        return 1;
+    } else {
+        std::cout << "SpMV benchmark passed validation.\n";
     }
 
     return 0;

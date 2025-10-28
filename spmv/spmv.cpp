@@ -14,9 +14,9 @@ class CSR {
     std::vector<int> row_ptr;   // Row pointer
     std::vector<int> col_ind;   // Column indices
     std::vector<double> values; // Non-zero values
-    int num_rows;
-    int num_cols;
-    int num_nonzeros;
+    size_t num_rows;
+    size_t num_cols;
+    size_t num_nonzeros;
   public:
     // Do not use default constructor
     // Use factory function to create CSR from file
@@ -66,23 +66,23 @@ class CSR {
         // and values of the non-zero elements. Since we are not assuming the
         // file is sorted, we will store the entries in an ordered_map, where
         // the key is a pair of (row, col) and the value is the matrix value.
-        int64_t num_rows = 0;
-        int64_t num_cols = 0;
-        int64_t num_nonzeros = 0;
+        size_t num_rows = 0;
+        size_t num_cols = 0;
+        size_t num_nonzeros = 0;
         // Skip comment lines and find the first non-comment line
         while (infile.peek() == '%') {
             infile.ignore(2048, '\n');
         }
         // Read matrix dimensions and number of non-zeros
         infile >> num_rows >> num_cols >> num_nonzeros;
-        csr.num_rows = static_cast<int>(num_rows);
-        csr.num_cols = static_cast<int>(num_cols);
-        csr.num_nonzeros = static_cast<int>(num_nonzeros);
+        csr.num_rows = num_rows;
+        csr.num_cols = num_cols;
+        csr.num_nonzeros = num_nonzeros;
         std::cout << "Matrix dimensions: " << num_rows << " x " << num_cols
                   << " with " << num_nonzeros << " non-zeros.\n";
         // Now we read the non-zero entries
         std::map<std::pair<int, int>, double, std::less<std::pair<int, int>>> entries;
-        for (uint64_t i = 0; i < num_nonzeros; ++i) {
+        for (size_t i = 0; i < num_nonzeros; ++i) {
             int row, col;
             double value;
             infile >> row >> col >> value;
@@ -113,17 +113,17 @@ class CSR {
     }
 
     // Get number of rows
-    int GetNumRows() const {
+    size_t GetNumRows() const {
         return num_rows;
     }
 
     // Get number of columns
-    int GetNumCols() const {
+    size_t GetNumCols() const {
         return num_cols;
     }
 
     // Get number of non-zeros
-    int GetNumNonZeros() const {
+    size_t GetNumNonZeros() const {
         return num_nonzeros;
     }
 
@@ -138,12 +138,14 @@ class CSR {
 
     // Print the CSR representation (for debugging)
     void Print() const {
-        for (int i = 0; i < GetNumRows(); ++i) {
+        for (size_t i = 0; i < GetNumRows(); ++i) {
             int row_start = row_ptr[i];
             int row_end = row_ptr[i + 1];
             for (int j = row_start; j < row_end; ++j) {
-                std::cout << "(" << i+1 << ", " << col_ind[j]+1 << ") = " << values[j] << "\n";
-                printf("Row %d: Col %d, Value %f\n", i+1, col_ind[j]+1, values[j]);
+                printf(
+                    "(Row %d: Col %d): Value %f\n",
+                    static_cast<int>(i+1), col_ind[j]+1, values[j]
+                );
             }
         }
     }
@@ -156,7 +158,7 @@ class CSR {
         #pragma omp parallel  // Enable OpenMP parallelization
         {
             #pragma omp for nowait
-            for (int i = 0; i < GetNumRows(); ++i) {
+            for (size_t i = 0; i < GetNumRows(); ++i) {
                 int row_start = row_ptr[i];
                 int row_end = row_ptr[i + 1];
                 for (int j = row_start; j < row_end; ++j) {

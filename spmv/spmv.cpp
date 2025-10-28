@@ -3,11 +3,32 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <omp.h>
+
+#if ENABLE_PICKLEDEVICE==1
+#pragma message("Compiling with Pickle device")
+#include "pickle_device_manager.h"
+#include "pickle_job.h"
+#else
+#pragma message("NOT compiling with Pickle device")
+#endif
+
+#if ENABLE_GEM5==1
+#pragma message("Compiling with gem5 instructions")
+#include <gem5/m5ops.h>
+#include "m5_mmap.h"
+#endif // ENABLE_GEM5
+
+#if ENABLE_PICKLEDEVICE==1
+std::unique_ptr<PickleDeviceManager> pdev(new PickleDeviceManager());
+uint64_t* UCPage = NULL;
+uint64_t* PerfPage = NULL;
+#endif
 
 class CSR {
   private:
@@ -151,8 +172,31 @@ class CSR {
     }
 
     // Perform Sparse Matrix-Vector Multiplication (SpMV)
-    std::vector<double> SpMV(const std::vector<double>& x) const {
+    // Params:
+    //   x: the x vector in y=Ax
+    //   try_using_pickle_prefetcher: if set to True, and if the hardware has Pickle device, we will
+    // use if; not using the Pickle device otherwise.
+    std::vector<double> SpMV(const std::vector<double>& x, bool try_using_pickle_prefetcher) const {
         assert(x.size() == GetNumCols());
+        if (try_using_pickle_prefetcher) {
+            // If we use pickle prefetcher, we need to do the following steps,
+            // Step 1. Gather the prefetcher specs
+            uint64_t use_pdev = 0;
+            uint64_t prefetch_distance = 0;
+#if ENABLE_PICKLEDEVICE==1
+            PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
+            use_pdev = specs.availability;
+            prefetch_distance = specs.prefetch_distance;
+#endif
+            std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
+            // Step 2. Construct the dependency graph
+            // row_ptr -> col_idx -> values and y
+            // Step 3. Send the graph to the prefetcher
+        }
+        std::cout << "ROI Start" << std::endl;
+#if ENABLE_GEM5==1
+        m5_exit_addr(0); // exit 1, 3
+#endif // ENABLE_GEM5
         std::vector<double> y(GetNumRows(), 0.0);
         std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
@@ -167,6 +211,10 @@ class CSR {
             }
             //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
         }
+#if ENABLE_GEM5==1
+    m5_exit_addr(0); // exit 2, 4
+#endif // ENABLE_GEM5
+        std::cout << "ROI end" << std::endl;
         return y;
     }
 
@@ -199,14 +247,19 @@ bool BenchmarkSpMV(const CSR& A) {
     const double A_element_wise_sum = A.GetSumOfValues();
     std::vector<double> x1(A.GetNumCols(), 1.0); // Input vector of all ones
     std::vector<double> x2(A.GetNumCols(), 5.0); // Input vector of all fives
+
+    // First iteration of SpMV
     const double y1_time_start = omp_get_wtime();
-    std::vector<double> y1 = A.SpMV(x1); // Warm-up run
+    std::vector<double> y1 = A.SpMV(x1, false); // Warm-up run
     const double y1_time_end = omp_get_wtime();
     std::cout << "Warm-up SpMV time: " << (y1_time_end - y1_time_start) << " seconds.\n";
+
+    // Second iteration of SpMV
     const double y2_time_start = omp_get_wtime();
-    std::vector<double> y2 = A.SpMV(x2); // Run twice for benchmarking
+    std::vector<double> y2 = A.SpMV(x2, true); // Run twice for benchmarking
     const double y2_time_end = omp_get_wtime();
     std::cout << "Benchmark SpMV time: " << (y2_time_end - y2_time_start) << " seconds.\n";
+
     // Validate results
     double y1_element_wise_sum = 0.0;
     for (const auto& val : y1) {

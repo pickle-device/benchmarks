@@ -223,59 +223,11 @@ class CSR {
     // Params:
     //   x: the x vector in y=Ax
     //   y: the output vector y in y=Ax
-    //   try_using_pickle_prefetcher: if set to True, and if the hardware has Pickle device, we will
-    // use if; not using the Pickle device otherwise.
-    void SpMV_into(const std::vector<double>& x, std::vector<double>& y, bool try_using_pickle_prefetcher) const {
+    void SpMVInto(const std::vector<double>& x, std::vector<double>& y) const {
         assert(x.size() == GetNumCols());
-#if ENABLE_PICKLEDEVICE==1
-        if (try_using_pickle_prefetcher) {
-            // If we use pickle prefetcher, we need to do the following steps,
-            // Step 1. Gather the prefetcher specs
-            uint64_t use_pdev = 0;
-            uint64_t prefetch_distance = 0;
-            PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
-            use_pdev = specs.availability;
-            prefetch_distance = specs.prefetch_distance;
-            std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
-            // Step 2. Construct the dependency graph
-            // row_ptr -> col_ind -> values and x
-            PickleJob job(/*kernel_name*/"spmv");
-            // Construct the row_ptr array descriptor
-            std::shared_ptr<PickleArrayDescriptor> row_ptr_array_descriptor = GetArrayDescriptor<int>(row_ptr);
-            row_ptr_array_descriptor->access_type = AccessType::Ranged;
-            row_ptr_array_descriptor->addressing_mode = AddressingMode::Index;
-            job.addArrayDescriptor(row_ptr_array_descriptor);
-            // Construct the col_ind array descriptor
-            std::shared_ptr<PickleArrayDescriptor> col_ind_array_descriptor = GetArrayDescriptor<int>(col_ind);
-            col_ind_array_descriptor->access_type = AccessType::SingleElement;
-            col_ind_array_descriptor->addressing_mode = AddressingMode::Index;
-            job.addArrayDescriptor(col_ind_array_descriptor);
-            // Construct the values array descriptor
-            std::shared_ptr<PickleArrayDescriptor> values_array_descriptor = GetArrayDescriptor<double>(values);
-            values_array_descriptor->access_type = AccessType::SingleElement;
-            values_array_descriptor->addressing_mode = AddressingMode::Index;
-            job.addArrayDescriptor(values_array_descriptor);
-            // Construct the y array descriptor
-            std::shared_ptr<PickleArrayDescriptor> x_array_descriptor = GetArrayDescriptor<double>(x);
-            x_array_descriptor->access_type = AccessType::SingleElement;
-            x_array_descriptor->addressing_mode = AddressingMode::Index;
-            job.addArrayDescriptor(x_array_descriptor);
-            // Construct the dependency graph
-            row_ptr_array_descriptor->dst_indexing_array_id = col_ind_array_descriptor->getArrayId();
-            col_ind_array_descriptor->dst_indexing_array_id = x_array_descriptor->getArrayId();
-            job.print();
-            // Step 3. Send the graph to the prefetcher
-            pdev->sendJob(job);
-            std::cout << "Sent job" << std::endl;
-            // Step 4. Setup the communication uncacheable page
-            UCPage = (uint64_t*) pdev->getUCPagePtr(0);
-            std::cout << "UCPage: 0x" << std::hex << (uint64_t)UCPage << std::dec << std::endl;
-            assert(UCPage != nullptr);
-        }
-#endif
         std::cout << "ROI Start" << std::endl;
 #if ENABLE_GEM5==1
-        m5_exit_addr(0); // exit 1, 3
+        m5_exit_addr(0); // exit 1
 #endif // ENABLE_GEM5
         std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
@@ -288,10 +240,86 @@ class CSR {
                     y[i] += values[j] * x[col_ind[j]];
                 }
             }
+        }
+#if ENABLE_GEM5==1
+    m5_exit_addr(0); // exit 2
+#endif // ENABLE_GEM5
+        std::cout << "ROI end" << std::endl;
+    }
+
+    void SpMVWithPrefetcherInto(const std::vector<double>& x, std::vector<double>& y) const {
+        assert(x.size() == GetNumCols());
+#if ENABLE_PICKLEDEVICE==1
+        // If we use pickle prefetcher, we need to do the following steps,
+        // Step 1. Gather the prefetcher specs
+        uint64_t use_pdev = 0;
+        uint64_t prefetch_distance = 0;
+        PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
+        use_pdev = specs.availability;
+        prefetch_distance = specs.prefetch_distance;
+        std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
+        // Step 2. Construct the dependency graph
+        // row_ptr -> col_ind -> values and x
+        PickleJob job(/*kernel_name*/"spmv");
+        // Construct the row_ptr array descriptor
+        std::shared_ptr<PickleArrayDescriptor> row_ptr_array_descriptor = GetArrayDescriptor<int>(row_ptr);
+        row_ptr_array_descriptor->access_type = AccessType::Ranged;
+        row_ptr_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(row_ptr_array_descriptor);
+        // Construct the col_ind array descriptor
+        std::shared_ptr<PickleArrayDescriptor> col_ind_array_descriptor = GetArrayDescriptor<int>(col_ind);
+        col_ind_array_descriptor->access_type = AccessType::SingleElement;
+        col_ind_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(col_ind_array_descriptor);
+        // Construct the values array descriptor
+        std::shared_ptr<PickleArrayDescriptor> values_array_descriptor = GetArrayDescriptor<double>(values);
+        values_array_descriptor->access_type = AccessType::SingleElement;
+        values_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(values_array_descriptor);
+        // Construct the y array descriptor
+        std::shared_ptr<PickleArrayDescriptor> x_array_descriptor = GetArrayDescriptor<double>(x);
+        x_array_descriptor->access_type = AccessType::SingleElement;
+        x_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(x_array_descriptor);
+        // Construct the dependency graph
+        row_ptr_array_descriptor->dst_indexing_array_id = col_ind_array_descriptor->getArrayId();
+        col_ind_array_descriptor->dst_indexing_array_id = x_array_descriptor->getArrayId();
+        job.print();
+        // Step 3. Send the graph to the prefetcher
+        pdev->sendJob(job);
+        std::cout << "Sent job" << std::endl;
+        // Step 4. Setup the communication uncacheable page
+        UCPage = (uint64_t*) pdev->getUCPagePtr(0);
+        std::cout << "UCPage: 0x" << std::hex << (uint64_t)UCPage << std::dec << std::endl;
+        assert(UCPage != nullptr);
+#endif
+        std::cout << "ROI Start" << std::endl;
+#if ENABLE_GEM5==1
+        m5_exit_addr(0); // exit 3
+#endif // ENABLE_GEM5
+        std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
+        #pragma omp parallel  // Enable OpenMP parallelization
+        {
+#if ENABLE_PICKLEDEVICE==1
+            const size_t prefetch_bound = GetNumRows() - prefetch_distance;
+#endif
+            #pragma omp for nowait
+            for (size_t i = 0; i < GetNumRows(); ++i) {
+#if ENABLE_PICKLEDEVICE==1
+                if (i < prefetch_bound) {
+                    UCPage = i;
+                }
+#endif
+                int row_start = row_ptr[i];
+                int row_end = row_ptr[i + 1];
+                for (int j = row_start; j < row_end; ++j) {
+                    y[i] += values[j] * x[col_ind[j]];
+                }
+            }
             //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
         }
 #if ENABLE_GEM5==1
-    m5_exit_addr(0); // exit 2, 4
+    m5_exit_addr(0); // exit 4
 #endif // ENABLE_GEM5
         std::cout << "ROI end" << std::endl;
     }
@@ -329,14 +357,14 @@ bool BenchmarkSpMV(const CSR& A) {
     // First iteration of SpMV
     const double y1_time_start = omp_get_wtime();
     std::vector<double> y(A.GetNumRows(), 0.0);
-    A.SpMV_into(x3, y, false); // Warm-up run
+    A.SpMVInto(x3, y); // Warm-up run
     const double y1_time_end = omp_get_wtime();
     std::cout << "Warm-up SpMV time: " << (y1_time_end - y1_time_start) << " seconds.\n";
 
     // Second iteration of SpMV
     const double y2_time_start = omp_get_wtime();
     std::fill(y.begin(), y.end(), 0.0);
-    A.SpMV_into(x5, y, true); // Run twice for benchmarking
+    A.SpMVWithPrefetcherInto(x5, y); // Run twice for benchmarking
     const double y2_time_end = omp_get_wtime();
     std::cout << "Benchmark SpMV time: " << (y2_time_end - y2_time_start) << " seconds.\n";
 

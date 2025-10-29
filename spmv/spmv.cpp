@@ -11,12 +11,9 @@
 #include <omp.h>
 
 #if ENABLE_PICKLEDEVICE==1
-#pragma message("Compiling with Pickle device")
 #include "pickle_device_manager.h"
 #include "pickle_job.h"
-#else
-#pragma message("NOT compiling with Pickle device")
-#endif
+#endif // ENABLE_PICKLEDEVICE
 
 #if ENABLE_GEM5==1
 #pragma message("Compiling with gem5 instructions")
@@ -28,7 +25,7 @@
 std::unique_ptr<PickleDeviceManager> pdev(new PickleDeviceManager());
 uint64_t* UCPage = NULL;
 uint64_t* PerfPage = NULL;
-#endif
+#endif // ENABLE_PICKLEDEVICE
 
 class CSR {
   private:
@@ -69,7 +66,7 @@ class CSR {
     // %
     // %=================================================================================
     // We do not assume that the Matrix Market file is sorted by row or column.
-    static CSR CreateFromMatrixMarketFile(const std::string& filename) {
+    static CSR CreateFromMatrixMarketFile(const std::string& filename, const bool is_symmetric) {
         CSR csr;
         std::cout << "Creating CSR from file: " << filename << "\n";
         // Read the file and populate csr.row_ptr, csr.col_ind, csr.values
@@ -107,9 +104,17 @@ class CSR {
             int row, col;
             double value;
             infile >> row >> col >> value;
+            if (value == 0) {
+                continue;
+            }
             // Store the entry in the map (adjusting for 1-based indexing)
             entries[{row - 1, col - 1}] = value;
+            if (is_symmetric && (row != col)) {
+                entries[{col - 1, row - 1}] = value;
+            }
         }
+        num_nonzeros = entries.size();
+        csr.num_nonzeros = num_nonzeros;
 
         // Now we need to convert the map to CSR format
         csr.row_ptr.resize(num_rows + 1, 0);
@@ -171,33 +176,107 @@ class CSR {
         }
     }
 
+#if ENABLE_PICKLEDEVICE==1
+    std::shared_ptr<PickleArrayDescriptor> GetRowPtrArrayDescriptor() const {
+        auto row_ptr_array_descriptor = std::make_shared<PickleArrayDescriptor>();
+        const auto* begin_ptr = row_ptr.data();
+        const auto* end_ptr = row_ptr.data() + row_ptr.size();
+        row_ptr_array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
+        row_ptr_array_descriptor->vaddr_end = (uint64_t)(end_ptr);
+        row_ptr_array_descriptor->element_size = sizeof(row_ptr[0]);
+        return row_ptr_array_descriptor;
+    }
+
+    std::shared_ptr<PickleArrayDescriptor> GetColIndArrayDescriptor() const {
+        auto col_ind_array_descriptor = std::make_shared<PickleArrayDescriptor>();
+        const auto* begin_ptr = col_ind.data();
+        const auto* end_ptr = col_ind.data() + col_ind.size();
+        col_ind_array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
+        col_ind_array_descriptor->vaddr_end = (uint64_t)(end_ptr);
+        col_ind_array_descriptor->element_size = sizeof(col_ind[0]);
+        return col_ind_array_descriptor;
+    }
+
+    std::shared_ptr<PickleArrayDescriptor> GetValuesArrayDescriptor() const {
+        auto values_array_descriptor = std::make_shared<PickleArrayDescriptor>();
+        const auto* begin_ptr = values.data();
+        const auto* end_ptr = values.data() + values.size();
+        values_array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
+        values_array_descriptor->vaddr_end = (uint64_t)(end_ptr);
+        values_array_descriptor->element_size = sizeof(values[0]);
+        return values_array_descriptor;
+    }
+
+    template <typename T>
+    std::shared_ptr<PickleArrayDescriptor> GetArrayDescriptor(const std::vector<T>& array) const {
+        auto array_descriptor = std::make_shared<PickleArrayDescriptor>();
+        const auto* begin_ptr = array.data();
+        const auto* end_ptr = array.data() + array.size();
+        array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
+        array_descriptor->vaddr_end = (uint64_t)(end_ptr);
+        array_descriptor->element_size = sizeof(T);
+        return array_descriptor;
+    }
+#endif // ENABLE_PICKLEDEVICE
+
     // Perform Sparse Matrix-Vector Multiplication (SpMV)
     // Params:
     //   x: the x vector in y=Ax
+    //   y: the output vector y in y=Ax
     //   try_using_pickle_prefetcher: if set to True, and if the hardware has Pickle device, we will
     // use if; not using the Pickle device otherwise.
-    std::vector<double> SpMV(const std::vector<double>& x, bool try_using_pickle_prefetcher) const {
+    void SpMV_into(const std::vector<double>& x, std::vector<double>& y, bool try_using_pickle_prefetcher) const {
         assert(x.size() == GetNumCols());
+#if ENABLE_PICKLEDEVICE==1
         if (try_using_pickle_prefetcher) {
             // If we use pickle prefetcher, we need to do the following steps,
             // Step 1. Gather the prefetcher specs
             uint64_t use_pdev = 0;
             uint64_t prefetch_distance = 0;
-#if ENABLE_PICKLEDEVICE==1
             PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
             use_pdev = specs.availability;
             prefetch_distance = specs.prefetch_distance;
-#endif
             std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
             // Step 2. Construct the dependency graph
-            // row_ptr -> col_idx -> values and y
+            // row_ptr -> col_ind -> values and x
+            PickleJob job(/*kernel_name*/"spmv");
+            // Construct the row_ptr array descriptor
+            std::shared_ptr<PickleArrayDescriptor> row_ptr_array_descriptor = GetArrayDescriptor<int>(row_ptr);
+            row_ptr_array_descriptor->access_type = AccessType::Ranged;
+            row_ptr_array_descriptor->addressing_mode = AddressingMode::Index;
+            job.addArrayDescriptor(row_ptr_array_descriptor);
+            // Construct the col_ind array descriptor
+            std::shared_ptr<PickleArrayDescriptor> col_ind_array_descriptor = GetArrayDescriptor<int>(col_ind);
+            col_ind_array_descriptor->access_type = AccessType::SingleElement;
+            col_ind_array_descriptor->addressing_mode = AddressingMode::Index;
+            job.addArrayDescriptor(col_ind_array_descriptor);
+            // Construct the values array descriptor
+            std::shared_ptr<PickleArrayDescriptor> values_array_descriptor = GetArrayDescriptor<double>(values);
+            values_array_descriptor->access_type = AccessType::SingleElement;
+            values_array_descriptor->addressing_mode = AddressingMode::Index;
+            job.addArrayDescriptor(values_array_descriptor);
+            // Construct the y array descriptor
+            std::shared_ptr<PickleArrayDescriptor> x_array_descriptor = GetArrayDescriptor<double>(x);
+            x_array_descriptor->access_type = AccessType::SingleElement;
+            x_array_descriptor->addressing_mode = AddressingMode::Index;
+            job.addArrayDescriptor(x_array_descriptor);
+            // Construct the dependency graph
+            row_ptr_array_descriptor->dst_indexing_array_id = col_ind_array_descriptor->getArrayId();
+            col_ind_array_descriptor->dst_indexing_array_id = x_array_descriptor->getArrayId();
+            job.print();
             // Step 3. Send the graph to the prefetcher
+            pdev->sendJob(job);
+            std::cout << "Sent job" << std::endl;
+            // Step 4. Setup the communication uncacheable page
+            UCPage = (uint64_t*) pdev->getUCPagePtr(0);
+            std::cout << "UCPage: 0x" << std::hex << (uint64_t)UCPage << std::dec << std::endl;
+            assert(UCPage != nullptr);
         }
+#endif
         std::cout << "ROI Start" << std::endl;
 #if ENABLE_GEM5==1
         m5_exit_addr(0); // exit 1, 3
 #endif // ENABLE_GEM5
-        std::vector<double> y(GetNumRows(), 0.0);
         std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
@@ -215,7 +294,6 @@ class CSR {
     m5_exit_addr(0); // exit 2, 4
 #endif // ENABLE_GEM5
         std::cout << "ROI end" << std::endl;
-        return y;
     }
 
 };  // class CSR
@@ -224,11 +302,11 @@ class CSR {
 // Returns true if they are equal within the tolerance, false otherwise
 // Tolerance is defined as tol_rate * expected_value
 bool ExpectEqual(double expected_value, double actual_value, double tol_rate = 1e-6) {
-    const double max_diff_allowed = expected_value * tol_rate;
+    const double max_diff_allowed = std::abs(expected_value * tol_rate);
     if (std::abs(expected_value - actual_value) > max_diff_allowed) {
         printf(
-            "tol_rate = %.8f, Expected %.8f but got %.8f\n",
-            tol_rate, actual_value, expected_value
+            "tol_rate = %.8f, max_diff_allowed = %8.f, Expected %.8f but got %.8f\n",
+            tol_rate, max_diff_allowed, actual_value, expected_value
         );
         return false;
     }
@@ -237,7 +315,7 @@ bool ExpectEqual(double expected_value, double actual_value, double tol_rate = 1
 
 // Benchmarking function for SpMV
 // Runs SpMV twice:
-// - iter 1 is a warm-up run performing A * x_1 where x_1 is a vector of all ones
+// - iter 1 is a warm-up run performing A * x_3 where x_3 is a vector of all threes
 // - iter 2 is the actual benchmark performing A * x_5 where x_5 is a vector of all fives
 // Params:
 // - A: The CSR matrix
@@ -245,29 +323,26 @@ bool ExpectEqual(double expected_value, double actual_value, double tol_rate = 1
 // - true if the benchmark passes validation, false otherwise
 bool BenchmarkSpMV(const CSR& A) {
     const double A_element_wise_sum = A.GetSumOfValues();
-    std::vector<double> x1(A.GetNumCols(), 1.0); // Input vector of all ones
-    std::vector<double> x2(A.GetNumCols(), 5.0); // Input vector of all fives
+    std::vector<double> x3(A.GetNumCols(), 3.0); // Input vector of all threes
+    std::vector<double> x5(A.GetNumCols(), 5.0); // Input vector of all fives
 
     // First iteration of SpMV
     const double y1_time_start = omp_get_wtime();
-    std::vector<double> y1 = A.SpMV(x1, false); // Warm-up run
+    std::vector<double> y(A.GetNumRows(), 0.0);
+    A.SpMV_into(x3, y, false); // Warm-up run
     const double y1_time_end = omp_get_wtime();
     std::cout << "Warm-up SpMV time: " << (y1_time_end - y1_time_start) << " seconds.\n";
 
     // Second iteration of SpMV
     const double y2_time_start = omp_get_wtime();
-    std::vector<double> y2 = A.SpMV(x2, true); // Run twice for benchmarking
+    std::fill(y.begin(), y.end(), 0.0);
+    A.SpMV_into(x5, y, true); // Run twice for benchmarking
     const double y2_time_end = omp_get_wtime();
     std::cout << "Benchmark SpMV time: " << (y2_time_end - y2_time_start) << " seconds.\n";
 
     // Validate results
-    double y1_element_wise_sum = 0.0;
-    for (const auto& val : y1) {
-        y1_element_wise_sum += val;
-    }
-    assert(ExpectEqual(A_element_wise_sum, y1_element_wise_sum));
     double y2_element_wise_sum = 0.0;
-    for (const auto& val : y2) {
+    for (const auto& val : y) {
         y2_element_wise_sum += val;
     }
     assert(ExpectEqual(A_element_wise_sum * 5.0, y2_element_wise_sum));
@@ -277,13 +352,16 @@ bool BenchmarkSpMV(const CSR& A) {
 int main(int argc, char** argv) {
     std::cout << "Sparse Matrix-Vector Multiplication (SpMV) Benchmark\n";
 
-    if (argc != 2) {
-        std::cout << "Usage: " << argv[0] << " <matrix_file>\n";
+    if (argc != 3) {
+        std::cout << "Usage: " << argv[0] << " <is_symmetric> <matrix_file>\n";
+        std::cout << "    <is_symmetric>: must be either True of False\n";
+        std::cout << "    <matrix_file>: path to a matrix market file\n";
         return 1;
     }
 
-    std::string matrix_file = argv[1];
-    CSR csr_matrix = CSR::CreateFromMatrixMarketFile(matrix_file);
+    const bool is_symmetric = std::string(argv[1]) == "True";
+    std::string matrix_file = argv[2];
+    CSR csr_matrix = CSR::CreateFromMatrixMarketFile(matrix_file, is_symmetric);
 
     if (!BenchmarkSpMV(csr_matrix)) {
         std::cerr << "SpMV benchmark failed validation.\n";

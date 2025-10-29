@@ -51,7 +51,7 @@ else
 fi
 
 # DIMACS10/hugebubbles-00000, 18,318,143 x 18,318,143 matrix, 54,940,162 non-zeros; symmetric
-if [ ! -f "" ]; then
+if [ ! -f "hugebubbles-00000/hugebubbles-00000.mtx" ]; then
     wget https://www.cise.ufl.edu/research/sparse/MM/DIMACS10/hugebubbles-00000.tar.gz
     tar xf hugebubbles-00000.tar.gz
     rm hugebubbles-00000.tar.gz

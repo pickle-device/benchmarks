@@ -32,3 +32,29 @@ else
     echo "Skip steam1"
 fi
 
+# Schenk/nlpkkt200, 16,240,000 x 16,240,000 matrix, 440,225,632 non-zeros; symmetric
+if [ ! -f "nlpkkt200/nlpkkt200.mtx" ]; then 
+    wget https://www.cise.ufl.edu/research/sparse/MM/Schenk/nlpkkt200.tar.gz
+    tar xf nlpkkt200.tar.gz
+    rm nlpkkt200.tar.gz
+else
+    echo "Skip nlpkkt200"
+fi
+
+# Schenk/nlpkkt240, 27,993,600 x 27,993,600 matrix, 760,648,352 non-zeros; symmetric
+if [ ! -f "nlpkkt240/nlpkkt240.mtx" ]; then
+    wget https://www.cise.ufl.edu/research/sparse/MM/Schenk/nlpkkt240.tar.gz
+    tar xf nlpkkt240.tar.gz
+    rm nlpkkt240.tar.gz
+else
+    echo "Skip nlpkkt240"
+fi
+
+# DIMACS10/hugebubbles-00000, 18,318,143 x 18,318,143 matrix, 54,940,162 non-zeros; symmetric
+if [ ! -f "" ]; then
+    wget https://www.cise.ufl.edu/research/sparse/MM/DIMACS10/hugebubbles-00000.tar.gz
+    tar xf hugebubbles-00000.tar.gz
+    rm hugebubbles-00000.tar.gz
+else
+    echo "Skip hugebubbles-00000"
+fi

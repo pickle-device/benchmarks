@@ -349,12 +349,20 @@ int main(int argc, char** argv) {
     std::string matrix_file = argv[1];
     CSR csr_matrix = CSR::CreateFromCSRFile(matrix_file);
 
+#if ENABLE_GEM5==1
+    map_m5_mem();
+#endif // ENABLE_GEM5
+
     if (!BenchmarkSpMV(csr_matrix)) {
         std::cerr << "SpMV benchmark failed validation.\n";
         return 1;
     } else {
         std::cout << "SpMV benchmark passed validation.\n";
     }
+
+#if ENABLE_GEM5==1
+  //unmap_m5_mem();
+#endif // ENABLE_GEM5
 
     return 0;
 }

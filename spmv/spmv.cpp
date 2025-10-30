@@ -40,33 +40,7 @@ class CSR {
     // Use factory function to create CSR from file
     CSR() {}
 
-    // Read the Matrix Market file and populate CSR format data structures
-    // Matrix Market format: https://math.nist.gov/MatrixMarket/formats.html
-    // Excerpt from the format:
-    // %%MatrixMarket matrix coordinate real general
-    // %=================================================================================
-    // %
-    // % This ASCII file represents a sparse MxN matrix with L 
-    // % nonzeros in the following Matrix Market format:
-    // %
-    // % +----------------------------------------------+
-    // % |%%MatrixMarket matrix coordinate real general | <--- header line
-    // % |%                                             | <--+
-    // % |% comments                                    |    |-- 0 or more comment lines
-    // % |%                                             | <--+         
-    // % |    M  N  L                                   | <--- rows, columns, entries
-    // % |    I1  J1  A(I1, J1)                         | <--+
-    // % |    I2  J2  A(I2, J2)                         |    |
-    // % |    I3  J3  A(I3, J3)                         |    |-- L lines
-    // % |        . . .                                 |    |
-    // % |    IL JL  A(IL, JL)                          | <--+
-    // % +----------------------------------------------+   
-    // %
-    // % Indices are 1-based, i.e. A(1,1) is the first element.
-    // %
-    // %=================================================================================
-    // We do not assume that the Matrix Market file is sorted by row or column.
-    static CSR CreateFromMatrixMarketFile(const std::string& filename, const bool is_symmetric) {
+    static CSR CreateFromCSRFile(const std::string& filename) {
         CSR csr;
         std::cout << "Creating CSR from file: " << filename << "\n";
         // Read the file and populate csr.row_ptr, csr.col_ind, csr.values
@@ -77,64 +51,45 @@ class CSR {
             return csr;
         }
 
-        // We are reading the file as follows:
-        // - We read the first non-comment line to get the matrix dimensions and
-        // number of non-zeros.
-        // - We read subsequent lines to get the row indices, column indices,
-        // and values of the non-zero elements. Since we are not assuming the
-        // file is sorted, we will store the entries in an ordered_map, where
-        // the key is a pair of (row, col) and the value is the matrix value.
+        // Read the matrix info
         size_t num_rows = 0;
         size_t num_cols = 0;
         size_t num_nonzeros = 0;
-        // Skip comment lines and find the first non-comment line
-        while (infile.peek() == '%') {
-            infile.ignore(2048, '\n');
-        }
-        // Read matrix dimensions and number of non-zeros
         infile >> num_rows >> num_cols >> num_nonzeros;
         csr.num_rows = num_rows;
         csr.num_cols = num_cols;
         csr.num_nonzeros = num_nonzeros;
         std::cout << "Matrix dimensions: " << num_rows << " x " << num_cols
                   << " with " << num_nonzeros << " non-zeros.\n";
-        // Now we read the non-zero entries
-        std::map<std::pair<int, int>, double, std::less<std::pair<int, int>>> entries;
-        for (size_t i = 0; i < num_nonzeros; ++i) {
-            int row, col;
-            double value;
-            infile >> row >> col >> value;
-            if (value == 0) {
-                continue;
-            }
-            // Store the entry in the map (adjusting for 1-based indexing)
-            entries[{row - 1, col - 1}] = value;
-            if (is_symmetric && (row != col)) {
-                entries[{col - 1, row - 1}] = value;
-            }
-        }
-        num_nonzeros = entries.size();
-        csr.num_nonzeros = num_nonzeros;
-
-        // Now we need to convert the map to CSR format
-        csr.row_ptr.resize(num_rows + 1, 0);
+        // Allocating memory
+        csr.row_ptr.reserve(num_rows+1);
         csr.col_ind.reserve(num_nonzeros);
         csr.values.reserve(num_nonzeros);
-
-        for (const auto& entry : entries) {
-            int row = entry.first.first;
-            int col = entry.first.second;
-            double value = entry.second;
-            csr.col_ind.push_back(col);
-            csr.values.push_back(value);
-            csr.row_ptr[row + 1]++; // Increment the count of non-zeros in this row
+        // Read the row_ptr array
+        {
+            int v = 0;
+            for (size_t i = 0; i < num_rows + 1; i++) {
+                infile >> v;
+                csr.row_ptr.push_back(v);
+            }
         }
-
-        // Compute the row_ptr array
-        for (size_t i = 1; i < csr.row_ptr.size(); ++i) {
-            csr.row_ptr[i] += csr.row_ptr[i - 1];
+        // Read the col_ind array
+        {
+            int v = 0;
+            for (size_t i = 0; i < num_nonzeros; i++) {
+                infile >> v;
+                csr.col_ind.push_back(v);
+            }
         }
-
+        // Read the values array
+        {
+            double v = 0;
+            for (size_t i = 0; i < num_nonzeros; i++) {
+                infile >> v;
+                csr.values.push_back(v);
+            }
+        }
+        infile.close();
         return csr;
     }
 
@@ -229,7 +184,12 @@ class CSR {
 #if ENABLE_GEM5==1
         m5_exit_addr(0); // exit 1
 #endif // ENABLE_GEM5
-        std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
+#if ENABLE_PICKLEDEVICE==1
+        PerfPage = (uint64_t*) pdev->getPerfPagePtr();
+        std::cout << "PerfPage: 0x" << std::hex << (uint64_t)PerfPage << std::dec << std::endl;
+        assert(PerfPage != nullptr);
+#endif
+        std::cout << "Starting SpMV qcomputation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
             #pragma omp for nowait
@@ -307,7 +267,7 @@ class CSR {
             for (size_t i = 0; i < GetNumRows(); ++i) {
 #if ENABLE_PICKLEDEVICE==1
                 if (i < prefetch_bound) {
-                    UCPage = i;
+                    *UCPage = static_cast<uint64_t>(i);
                 }
 #endif
                 int row_start = row_ptr[i];
@@ -380,16 +340,14 @@ bool BenchmarkSpMV(const CSR& A) {
 int main(int argc, char** argv) {
     std::cout << "Sparse Matrix-Vector Multiplication (SpMV) Benchmark\n";
 
-    if (argc != 3) {
-        std::cout << "Usage: " << argv[0] << " <is_symmetric> <matrix_file>\n";
-        std::cout << "    <is_symmetric>: must be either True of False\n";
-        std::cout << "    <matrix_file>: path to a matrix market file\n";
+    if (argc != 2) {
+        std::cout << "Usage: " << argv[0] << " <csr_file>\n";
+        std::cout << "    <csr_file>: path to a csr file containing matrix\n";
         return 1;
     }
 
-    const bool is_symmetric = std::string(argv[1]) == "True";
-    std::string matrix_file = argv[2];
-    CSR csr_matrix = CSR::CreateFromMatrixMarketFile(matrix_file, is_symmetric);
+    std::string matrix_file = argv[1];
+    CSR csr_matrix = CSR::CreateFromCSRFile(matrix_file);
 
     if (!BenchmarkSpMV(csr_matrix)) {
         std::cerr << "SpMV benchmark failed validation.\n";

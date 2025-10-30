@@ -27,6 +27,9 @@ uint64_t* UCPage = NULL;
 uint64_t* PerfPage = NULL;
 #endif // ENABLE_PICKLEDEVICE
 
+const uint64_t PERF_THREAD_START = 0;
+const uint64_t PERF_THREAD_COMPLETE = 1;
+
 class CSR {
   private:
     std::vector<int> row_ptr;   // Row pointer
@@ -189,9 +192,11 @@ class CSR {
         std::cout << "PerfPage: 0x" << std::hex << (uint64_t)PerfPage << std::dec << std::endl;
         assert(PerfPage != nullptr);
 #endif
-        std::cout << "Starting SpMV qcomputation using " << omp_get_max_threads() << " threads.\n";
+        std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
+            const uint64_t thread_id = (uint64_t)omp_get_thread_num();
+            *PerfPage = (thread_id << 1) | PERF_THREAD_START;
             #pragma omp for nowait
             for (size_t i = 0; i < GetNumRows(); ++i) {
                 int row_start = row_ptr[i];
@@ -200,6 +205,7 @@ class CSR {
                     y[i] += values[j] * x[col_ind[j]];
                 }
             }
+            *PerfPage = (thread_id << 1) | PERF_THREAD_COMPLETE;
         }
 #if ENABLE_GEM5==1
     m5_exit_addr(0); // exit 2
@@ -260,15 +266,12 @@ class CSR {
         std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
-#if ENABLE_PICKLEDEVICE==1
-            const size_t prefetch_bound = GetNumRows() - prefetch_distance;
-#endif
+            const uint64_t thread_id = (uint64_t)omp_get_thread_num();
+            *PerfPage = (thread_id << 1) | PERF_THREAD_START;
             #pragma omp for nowait
             for (size_t i = 0; i < GetNumRows(); ++i) {
 #if ENABLE_PICKLEDEVICE==1
-                if (i < prefetch_bound) {
-                    *UCPage = static_cast<uint64_t>(i);
-                }
+                *UCPage = static_cast<uint64_t>(i);
 #endif
                 int row_start = row_ptr[i];
                 int row_end = row_ptr[i + 1];
@@ -276,6 +279,7 @@ class CSR {
                     y[i] += values[j] * x[col_ind[j]];
                 }
             }
+            *PerfPage = (thread_id << 1) | PERF_THREAD_COMPLETE;
             //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
         }
 #if ENABLE_GEM5==1

@@ -220,7 +220,7 @@ class CSR {
             assert(false);
         }
         // The first line contains the information about the matrix
-        outfile << num_rows << " " << num_cols << " " << num_nonzeros;
+        outfile << num_rows << " " << num_cols << " " << num_nonzeros << std::endl;
         // The next (num_rows+1) lines are the content of the row_ptr array
         for (const auto v: row_ptr) {
             outfile << v << std::endl;

@@ -208,7 +208,7 @@ class CSR {
             *PerfPage = (thread_id << 1) | PERF_THREAD_COMPLETE;
         }
 #if ENABLE_GEM5==1
-    m5_exit_addr(0); // exit 2
+        m5_exit_addr(0); // exit 2
 #endif // ENABLE_GEM5
         std::cout << "ROI end" << std::endl;
     }
@@ -217,14 +217,7 @@ class CSR {
         assert(x.size() == GetNumCols());
 #if ENABLE_PICKLEDEVICE==1
         // If we use pickle prefetcher, we need to do the following steps,
-        // Step 1. Gather the prefetcher specs
-        uint64_t use_pdev = 0;
-        uint64_t prefetch_distance = 0;
-        PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
-        use_pdev = specs.availability;
-        prefetch_distance = specs.prefetch_distance;
-        std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
-        // Step 2. Construct the dependency graph
+        // Step 1. Construct the dependency graph
         // row_ptr -> col_ind -> values and x
         PickleJob job(/*kernel_name*/"spmv");
         // Construct the row_ptr array descriptor
@@ -251,10 +244,10 @@ class CSR {
         row_ptr_array_descriptor->dst_indexing_array_id = col_ind_array_descriptor->getArrayId();
         col_ind_array_descriptor->dst_indexing_array_id = x_array_descriptor->getArrayId();
         job.print();
-        // Step 3. Send the graph to the prefetcher
+        // Step 2. Send the graph to the prefetcher
         pdev->sendJob(job);
         std::cout << "Sent job" << std::endl;
-        // Step 4. Setup the communication uncacheable page
+        // Step 3. Setup the communication uncacheable page
         UCPage = (uint64_t*) pdev->getUCPagePtr(0);
         std::cout << "UCPage: 0x" << std::hex << (uint64_t)UCPage << std::dec << std::endl;
         assert(UCPage != nullptr);
@@ -283,7 +276,7 @@ class CSR {
             //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
         }
 #if ENABLE_GEM5==1
-    m5_exit_addr(0); // exit 4
+        m5_exit_addr(0); // exit 4
 #endif // ENABLE_GEM5
         std::cout << "ROI end" << std::endl;
     }
@@ -328,7 +321,20 @@ bool BenchmarkSpMV(const CSR& A) {
     // Second iteration of SpMV
     const double y2_time_start = omp_get_wtime();
     std::fill(y.begin(), y.end(), 0.0);
-    A.SpMVWithPrefetcherInto(x5, y); // Run twice for benchmarking
+    // Gather the prefetcher specs
+    uint64_t use_pdev = 0;
+    uint64_t prefetch_distance = 0;
+#if ENABLE_PICKLEDEVICE==1
+    PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
+    use_pdev = specs.availability;
+    prefetch_distance = specs.prefetch_distance;
+    std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
+#endif
+    if (use_pdev == 0) {
+        A.SpMVInto(x5, y);
+    } else {
+        A.SpMVWithPrefetcherInto(x5, y); // Run twice for benchmarking
+    }
     const double y2_time_end = omp_get_wtime();
     std::cout << "Benchmark SpMV time: " << (y2_time_end - y2_time_start) << " seconds.\n";
 

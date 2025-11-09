@@ -195,8 +195,11 @@ class CSR {
         std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
+#if ENABLE_PICKLEDEVICE==1
             const uint64_t thread_id = (uint64_t)omp_get_thread_num();
             *PerfPage = (thread_id << 1) | PERF_THREAD_START;
+            //std::cout << "Thread " << thread_id << "starts" <<std::endl;
+#endif
             #pragma omp for nowait
             for (size_t i = 0; i < GetNumRows(); ++i) {
                 int row_start = row_ptr[i];
@@ -205,7 +208,9 @@ class CSR {
                     y[i] += values[j] * x[col_ind[j]];
                 }
             }
+#if ENABLE_PICKLEDEVICE==1
             *PerfPage = (thread_id << 1) | PERF_THREAD_COMPLETE;
+#endif
         }
 #if ENABLE_GEM5==1
         m5_exit_addr(0); // exit 2
@@ -259,8 +264,11 @@ class CSR {
         std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
         #pragma omp parallel  // Enable OpenMP parallelization
         {
+#if ENABLE_PICKLEDEVICE==1
             const uint64_t thread_id = (uint64_t)omp_get_thread_num();
             *PerfPage = (thread_id << 1) | PERF_THREAD_START;
+            //std::cout << "Thread " << thread_id << "starts" <<std::endl;
+#endif
             #pragma omp for nowait
             for (size_t i = 0; i < GetNumRows(); ++i) {
 #if ENABLE_PICKLEDEVICE==1
@@ -272,7 +280,86 @@ class CSR {
                     y[i] += values[j] * x[col_ind[j]];
                 }
             }
+#if ENABLE_PICKLEDEVICE==1
+            //std::cout << "Thread " << thread_id << "ends" <<std::endl;
             *PerfPage = (thread_id << 1) | PERF_THREAD_COMPLETE;
+#endif
+            //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
+        }
+#if ENABLE_GEM5==1
+        m5_exit_addr(0); // exit 4
+#endif // ENABLE_GEM5
+        std::cout << "ROI end" << std::endl;
+    }
+
+    void SpMVWithPrefetcherInBulkModeInto(const std::vector<double>& x, std::vector<double>& y, const uint64_t bulk_mode_chunk_size) const {
+        assert(x.size() == GetNumCols());
+#if ENABLE_PICKLEDEVICE==1
+        // If we use pickle prefetcher, we need to do the following steps,
+        // Step 1. Construct the dependency graph
+        // row_ptr -> col_ind -> values and x
+        PickleJob job(/*kernel_name*/"spmv");
+        // Construct the row_ptr array descriptor
+        std::shared_ptr<PickleArrayDescriptor> row_ptr_array_descriptor = GetArrayDescriptor<int>(row_ptr);
+        row_ptr_array_descriptor->access_type = AccessType::Ranged;
+        row_ptr_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(row_ptr_array_descriptor);
+        // Construct the col_ind array descriptor
+        std::shared_ptr<PickleArrayDescriptor> col_ind_array_descriptor = GetArrayDescriptor<int>(col_ind);
+        col_ind_array_descriptor->access_type = AccessType::SingleElement;
+        col_ind_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(col_ind_array_descriptor);
+        // Construct the values array descriptor
+        std::shared_ptr<PickleArrayDescriptor> values_array_descriptor = GetArrayDescriptor<double>(values);
+        values_array_descriptor->access_type = AccessType::SingleElement;
+        values_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(values_array_descriptor);
+        // Construct the y array descriptor
+        std::shared_ptr<PickleArrayDescriptor> x_array_descriptor = GetArrayDescriptor<double>(x);
+        x_array_descriptor->access_type = AccessType::SingleElement;
+        x_array_descriptor->addressing_mode = AddressingMode::Index;
+        job.addArrayDescriptor(x_array_descriptor);
+        // Construct the dependency graph
+        row_ptr_array_descriptor->dst_indexing_array_id = col_ind_array_descriptor->getArrayId();
+        col_ind_array_descriptor->dst_indexing_array_id = x_array_descriptor->getArrayId();
+        job.print();
+        // Step 2. Send the graph to the prefetcher
+        pdev->sendJob(job);
+        std::cout << "Sent job" << std::endl;
+        // Step 3. Setup the communication uncacheable page
+        UCPage = (uint64_t*) pdev->getUCPagePtr(0);
+        std::cout << "UCPage: 0x" << std::hex << (uint64_t)UCPage << std::dec << std::endl;
+        assert(UCPage != nullptr);
+#endif
+        std::cout << "ROI Start" << std::endl;
+#if ENABLE_GEM5==1
+        m5_exit_addr(0); // exit 3
+#endif // ENABLE_GEM5
+        std::cout << "Starting SpMV computation using " << omp_get_max_threads() << " threads.\n";
+        #pragma omp parallel  // Enable OpenMP parallelization
+        {
+#if ENABLE_PICKLEDEVICE==1
+            const uint64_t thread_id = (uint64_t)omp_get_thread_num();
+            *PerfPage = (thread_id << 1) | PERF_THREAD_START;
+            //std::cout << "Thread " << thread_id << "starts" <<std::endl;
+#endif
+            #pragma omp for schedule(dynamic, bulk_mode_chunk_size) nowait
+            for (size_t i = 0; i < GetNumRows(); ++i) {
+#if ENABLE_PICKLEDEVICE==1
+                if (i % bulk_mode_chunk_size) {
+                    *UCPage = static_cast<uint64_t>(i);
+                }
+#endif
+                int row_start = row_ptr[i];
+                int row_end = row_ptr[i + 1];
+                for (int j = row_start; j < row_end; ++j) {
+                    y[i] += values[j] * x[col_ind[j]];
+                }
+            }
+#if ENABLE_PICKLEDEVICE==1
+            //std::cout << "Thread " << thread_id << "ends" <<std::endl;
+            *PerfPage = (thread_id << 1) | PERF_THREAD_COMPLETE;
+#endif
             //std::cout << "Thread " << omp_get_thread_num() << " completed SpMV computation.\n";
         }
 #if ENABLE_GEM5==1
@@ -321,19 +408,33 @@ bool BenchmarkSpMV(const CSR& A) {
     // Second iteration of SpMV
     const double y2_time_start = omp_get_wtime();
     std::fill(y.begin(), y.end(), 0.0);
-    // Gather the prefetcher specs
+    // Gather the device specs
     uint64_t use_pdev = 0;
     uint64_t prefetch_distance = 0;
+    PrefetchMode prefetch_mode = PrefetchMode::UNKNOWN;
+    uint64_t bulk_mode_chunk_size = 0;
 #if ENABLE_PICKLEDEVICE==1
     PickleDevicePrefetcherSpecs specs = pdev->getDevicePrefetcherSpecs();
     use_pdev = specs.availability;
     prefetch_distance = specs.prefetch_distance;
-    std::cout << "Use pdev: " << use_pdev << "; Prefetch distance: " << prefetch_distance << std::endl;
+    prefetch_mode = specs.prefetch_mode;
+    bulk_mode_chunk_size = specs.bulk_mode_chunk_size;
 #endif
+    std::cout << "Device specs: " << std::endl;
+    std::cout << "  . Use pdev: " << use_pdev << std::endl;
+    std::cout << "  . Prefetch distance: " << prefetch_distance << std::endl;
+    std::cout << "  . Prefetch mode (0: unknown, 1: single, 2: bulk): " << prefetch_mode << std::endl;
+    std::cout << "  . Chunk size (should be non-zero in bulk mode): " << bulk_mode_chunk_size << std::endl;
     if (use_pdev == 0) {
         A.SpMVInto(x5, y);
     } else {
-        A.SpMVWithPrefetcherInto(x5, y); // Run twice for benchmarking
+        if (prefetch_mode == PrefetchMode::SINGLE_PREFETCH) {
+            A.SpMVWithPrefetcherInto(x5, y);
+        } else if (prefetch_mode == PrefetchMode::BULK_PREFETCH) {
+            A.SpMVWithPrefetcherInBulkModeInto(x5, y, bulk_mode_chunk_size);
+        } else {
+            std::cerr << "Unknown prefetch mode" << std::endl;
+        }
     }
     const double y2_time_end = omp_get_wtime();
     std::cout << "Benchmark SpMV time: " << (y2_time_end - y2_time_start) << " seconds.\n";

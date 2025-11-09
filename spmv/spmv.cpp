@@ -135,36 +135,6 @@ class CSR {
     }
 
 #if ENABLE_PICKLEDEVICE==1
-    std::shared_ptr<PickleArrayDescriptor> GetRowPtrArrayDescriptor() const {
-        auto row_ptr_array_descriptor = std::make_shared<PickleArrayDescriptor>();
-        const auto* begin_ptr = row_ptr.data();
-        const auto* end_ptr = row_ptr.data() + row_ptr.size();
-        row_ptr_array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
-        row_ptr_array_descriptor->vaddr_end = (uint64_t)(end_ptr);
-        row_ptr_array_descriptor->element_size = sizeof(row_ptr[0]);
-        return row_ptr_array_descriptor;
-    }
-
-    std::shared_ptr<PickleArrayDescriptor> GetColIndArrayDescriptor() const {
-        auto col_ind_array_descriptor = std::make_shared<PickleArrayDescriptor>();
-        const auto* begin_ptr = col_ind.data();
-        const auto* end_ptr = col_ind.data() + col_ind.size();
-        col_ind_array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
-        col_ind_array_descriptor->vaddr_end = (uint64_t)(end_ptr);
-        col_ind_array_descriptor->element_size = sizeof(col_ind[0]);
-        return col_ind_array_descriptor;
-    }
-
-    std::shared_ptr<PickleArrayDescriptor> GetValuesArrayDescriptor() const {
-        auto values_array_descriptor = std::make_shared<PickleArrayDescriptor>();
-        const auto* begin_ptr = values.data();
-        const auto* end_ptr = values.data() + values.size();
-        values_array_descriptor->vaddr_start = (uint64_t)(begin_ptr);
-        values_array_descriptor->vaddr_end = (uint64_t)(end_ptr);
-        values_array_descriptor->element_size = sizeof(values[0]);
-        return values_array_descriptor;
-    }
-
     template <typename T>
     std::shared_ptr<PickleArrayDescriptor> GetArrayDescriptor(const std::vector<T>& array) const {
         auto array_descriptor = std::make_shared<PickleArrayDescriptor>();
